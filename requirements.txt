@@ -3,5 +3,5 @@ uvicorn[standard]
 python-dotenv
 pydantic
 httpx
-supabase-py
+supabase
 python-multipart
