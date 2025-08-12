@@ -7,7 +7,6 @@ from schemas.test_schemas import TestRequest
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-JOB_SUMMARY_API_URL = "http://localhost:5000/api/jd/get-jd-summary/68870990e214ee4cab4957db"
 
 async def call_model(model_name: str, prompt: str):
     url = "https://openrouter.ai/api/v1/chat/completions"
@@ -40,8 +39,10 @@ async def call_model(model_name: str, prompt: str):
         print(f"❌ {model_name} failed:", e)
         return None
 
-async def fetch_job_summary():
+async def fetch_job_summary(jd_id: str):
+    """Fetch job summary using the provided job description ID"""
     try:
+        JOB_SUMMARY_API_URL = f"http://localhost:5000/api/jd/get-jd-summary/{jd_id}"
         async with httpx.AsyncClient() as client:
             headers = {
                 "Content-Type": "application/json",  # No JWT needed now
@@ -56,7 +57,11 @@ async def fetch_job_summary():
         return None
 
 async def generate_questions(request: TestRequest):
-    job_summary = await fetch_job_summary()
+    # Use the jd_id from the request to fetch job summary
+    job_summary = None
+    if request.jd_id:
+        job_summary = await fetch_job_summary(request.jd_id)
+    
     if not job_summary:
         print("⚠️ Failed to fetch job summary, using fallback mock data")
         job_summary = "Mock job summary: Python developer role requiring skills in web development and data analysis."
@@ -67,7 +72,7 @@ async def generate_questions(request: TestRequest):
         prompt = (
             f"Generate {request.num_questions} {request.difficulty} level coding questions "
             f"based on the job summary: '{request.topic}'. Respond only as a JSON array of objects. "
-            "Each object should have: `question` (coding problem statement), `answer` (expected code/logic). "
+            "Each object should have: question (coding problem statement), answer (expected code/logic). "
             "Do NOT include explanations."
         )
     elif request.question_type == "mixed":
@@ -78,8 +83,8 @@ async def generate_questions(request: TestRequest):
             f"Generate a mixed set of {mcq_count + coding_count} {request.difficulty} level questions "
             f"based on the job summary: '{request.topic}'. Include exactly {mcq_count} multiple choice questions and "
             f"{coding_count} coding questions.\n\n"
-            "Each MCQ should include: `question`, `options` (list of 4), and `answer`.\n"
-            "Each coding question should include: `question` and `answer` (code or logic).\n"
+            "Each MCQ should include: question, options (list of 4), and answer.\n"
+            "Each coding question should include: question and answer (code or logic).\n"
             "Respond only with a JSON array of such objects."
         )
     else:
@@ -87,7 +92,7 @@ async def generate_questions(request: TestRequest):
             f"Generate {request.num_questions} {request.difficulty} level multiple choice questions "
             f"based on the job summary: '{request.topic}'. "
             "Respond only as a valid JSON array of objects. Each object should have: "
-            "`question`, `options` (list of 4), and `answer`."
+            "question, options (list of 4), and answer."
         )
 
     result = await call_model("qwen/qwen3-coder:free", prompt)
