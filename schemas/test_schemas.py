@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from uuid import UUID
 
@@ -6,30 +6,30 @@ from uuid import UUID
 class Question(BaseModel):
     question: str
     options: Optional[List[str]] = None
-    answer: Optional[str] = None
+    answer: Optional[str] = None  # expected correct answer (server-side)
 
 
 class TestRequest(BaseModel):
     topic: str
     difficulty: str
     num_questions: int
-    question_type: Optional[str] = "mcq"  # values: "mcq", "coding", "mixed"
+    question_type: Optional[str] = "mcq"
     mcq_count: Optional[int] = 0
     coding_count: Optional[int] = 0
 
 
 class TestFinalizeRequest(BaseModel):
-    questions: List[Question]  # Expect list of question dicts
-    duration: Optional[int] = 20  # Duration in minutes, default 20
+    questions: List[Question]
+    duration: Optional[int] = 20  # minutes
 
 
 class TestSubmission(BaseModel):
+    candidate_id: UUID
     question_set_id: UUID
-    questions: List[Question]
+    questions: List[Question]          # for transparency/score calc
     answers: List[str]
     languages: Optional[List[str]] = None
-    duration_used: Optional[int] = None  # Time used in seconds
-    candidate_id: Optional[str] = None  # <-- Added to map with test_results
+    duration_used: Optional[int] = None  # seconds
 
 
 class TestResponse(BaseModel):
@@ -38,6 +38,6 @@ class TestResponse(BaseModel):
     duration: int
     message: str
 
-# New schema for login flow
+
 class CandidateLogin(BaseModel):
-    email: str
+    email: EmailStr
