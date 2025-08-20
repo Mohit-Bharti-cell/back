@@ -1,92 +1,75 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
+from typing import Optional
+
 from db.supabase import supabase
-from schemas.test_schemas import TestSubmission
-from services.test_evaluator import evaluate_test
+from schemas.test_schemas import CandidateLogin, TestSubmission
+from controller import candidate_login_controller, submit_test_controller  # controller.py at project root
 
 router = APIRouter()
 
 
+@router.post("/candidate-login")
+async def candidate_login(payload: CandidateLogin):
+    """
+    Initializes/ensures a single candidate row exists in test_results
+    with status='Not Started'. Data comes from the external HR API.
+    """
+    return await candidate_login_controller(payload.email)
+
+
 @router.get("/{question_set_id}")
 async def fetch_test(question_set_id: str):
+    """
+    Returns the questions + duration for a given question_set_id.
+    Enforces expiry based on question_sets.expires_at (timestamptz).
+    """
+    # Fetch question set
     res = supabase.table("question_sets").select("*").eq("id", question_set_id).execute()
-    print("📄 Supabase question_set response:", res)
-
-    if not res.data or len(res.data) == 0:
+    if not res.data:
         raise HTTPException(status_code=404, detail="Test not found")
 
     test_info = res.data[0]
-    expires_at = test_info.get("expires_at")
-    duration = test_info.get("duration", 20)  # Get duration, default to 20 minutes
+    expires_at: Optional[str] = test_info.get("expires_at")
+    duration = test_info.get("duration", 20)  # minutes
 
-    now = datetime.now(timezone.utc)
-    expires_dt = datetime.fromisoformat(expires_at)
+    # Expiry check
+    if expires_at:
+        # robust ISO parsing including Z suffix
+        try:
+            expires_dt = (
+                datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if isinstance(expires_at, str)
+                else expires_at
+            )
+        except Exception:
+            raise HTTPException(status_code=500, detail="Invalid expires_at format in DB")
 
-    if now > expires_dt:
-        raise HTTPException(status_code=410, detail="Test expired")
+        now = datetime.now(timezone.utc)
+        if now > expires_dt:
+            raise HTTPException(status_code=410, detail="Test expired")
 
-    q_res = supabase.table("questions").select("question, options").eq("question_set_id", question_set_id).execute()
-
+    # Fetch questions
+    q_res = (
+        supabase.table("questions")
+        .select("question, options")
+        .eq("question_set_id", question_set_id)
+        .execute()
+    )
     if not q_res.data:
         raise HTTPException(status_code=404, detail="No questions found")
 
     return {
         "questions": q_res.data,
-        "duration": duration,  # Include duration in response
-        "test_id": question_set_id
+        "duration": duration,
+        "test_id": question_set_id,
     }
 
 
 @router.post("/submit")
 async def submit_test(submission: TestSubmission):
-    print("📨 Received test submission:", submission.dict())
-
-    # Evaluate the test
-    result = await evaluate_test(submission)
-    print("✅ Evaluation result:", result)
-
-    # Calculate duration used in minutes if provided
-    duration_used_minutes = None
-    if submission.duration_used:
-        duration_used_minutes = round(submission.duration_used / 60, 2)
-
-    # Always try to save the result, even if evaluation had issues
-    try:
-        # Prepare data for database insertion
-        insert_data = {
-            "question_set_id": str(submission.question_set_id),
-            "score": result.get("score", 0),
-            "max_score": result.get("max_score", len(submission.questions) * 10),
-            "percentage": result.get("percentage", 0.0),
-            "status": result.get("status", "Fail"),
-            "total_questions": len(submission.questions),
-            "raw_feedback": result.get("raw_feedback", ""),
-            "duration_used_seconds": submission.duration_used,
-            "duration_used_minutes": duration_used_minutes
-        }
-        
-        # Insert into database
-        db_result = supabase.table("test_results").insert(insert_data).execute()
-        print("💾 Saved to database:", db_result.data[0] if db_result.data else "No data returned")
-        
-        # Add the database ID to the result
-        if db_result.data:
-            result["result_id"] = db_result.data[0].get("id")
-            
-    except Exception as e:
-        print("❌ Error inserting into Supabase:", e)
-        # Don't raise an exception here - we still want to return the evaluation result
-        # Just log the error and continue
-        result["database_error"] = str(e)
-
-    # Return the evaluation result (with additional fields)
-    return {
-        "score": result.get("score", 0),
-        "max_score": result.get("max_score", len(submission.questions) * 10),
-        "percentage": result.get("percentage", 0.0),
-        "status": result.get("status", "Fail"),
-        "raw_feedback": result.get("raw_feedback", ""),
-        "result_id": result.get("result_id"),
-        "database_error": result.get("database_error"),
-        "duration_used": duration_used_minutes
-    }
+    """
+    Evaluates answers and UPDATES the existing candidate row in test_results
+    (matched by candidate_id). Does NOT insert a new row.
+    """
+    return await submit_test_controller(submission)
