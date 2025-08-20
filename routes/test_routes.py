@@ -1,5 +1,3 @@
-# backend/routes/test_routes.py
-
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timezone
 from db.supabase import supabase
