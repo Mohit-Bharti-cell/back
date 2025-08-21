@@ -1,139 +1,239 @@
+from fastapi import APIRouter, HTTPException
 import httpx
-from fastapi import HTTPException
 from datetime import datetime, timezone
 from db.supabase import supabase
-from services.test_evaluator import evaluate_test
+from schemas.test_schemas import CandidateLoginRequest, CandidateLoginResponse
+import os
 
+router = APIRouter()
 
-HR_API_URL = "http://localhost:5000/get-filteredCandidateByEmail"
+# Base URL for the external API
+EXTERNAL_API_BASE_URL = "http://localhost:5000"
 
-
-async def candidate_login_controller(email: str):
+@router.post("/debug-external-api")
+async def debug_external_api(request: CandidateLoginRequest):
     """
-    Fetches candidate {email, candidate_id, name} from external HR API.
-    Ensures a single row exists in test_results with status='Not Started'.
-    If row already exists, returns the existing row.
+    Debug endpoint to see the raw response from external API
     """
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(HR_API_URL, params={"email": email})
-        if resp.status_code != 200:
-            raise HTTPException(status_code=400, detail="Candidate not found from HR API")
-
-        candidate = resp.json()  # expected: { "email": "...", "candidate_id": "...", "name": "..." }
-
-    # Basic validation
-    for key in ("email", "candidate_id", "name"):
-        if key not in candidate or not candidate[key]:
-            raise HTTPException(status_code=400, detail=f"HR API missing field: {key}")
-
-    candidate_id = str(candidate["candidate_id"])
-
-    # Check if candidate already exists
-    existing = (
-        supabase.table("test_results")
-        .select("*")
-        .eq("candidate_id", candidate_id)
-        .execute()
-    )
-
-    if existing.data:
-        # If exists but missing email/name, backfill
-        row = existing.data[0]
-        patch = {}
-        if not row.get("email"):
-            patch["email"] = candidate["email"]
-        if not row.get("name"):
-            patch["name"] = candidate["name"]
-        if patch:
-            patch["updated_at"] = datetime.now(timezone.utc).isoformat()
-            updated = (
-                supabase.table("test_results")
-                .update(patch)
-                .eq("candidate_id", candidate_id)
-                .execute()
+    try:
+        # Debug: Print the incoming request
+        print(f"🔍 Incoming request: {request}")
+        print(f"🔍 Request email: {request.email}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Debug: Print the payload being sent
+            payload = {"email": request.email}
+            print(f"🔍 Sending payload to external API: {payload}")
+            response = await client.post(
+                f"{EXTERNAL_API_BASE_URL}/api/jd/get-filteredCandidateByEmail",
+                json=payload
             )
-            if updated.data:
-                row = updated.data[0]
-        return {"message": "Candidate already exists", "data": row}
-
-    # Insert new candidate with "Not Started"
-    new_entry = {
-        "candidate_id": candidate_id,
-        "email": candidate["email"],
-        "name": candidate["name"],
-        "status": "Not Started",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    result = supabase.table("test_results").insert(new_entry).execute()
-    if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to insert candidate row")
-
-    return {"message": "Candidate added", "data": result.data[0]}
-
-
-async def submit_test_controller(submission):
+        print(f"🔍 External API status code: {response.status_code}")
+        print(f"🔍 External API response text: {response.text}")
+        response_data = response.json() if response.status_code == 200 else None
+ 
+        # If successful, also show the mapped data
+        mapped_data = None
+        if response_data and "filteredResumes" in response_data and response_data["filteredResumes"]:
+            candidate_info = response_data["filteredResumes"][0]
+            mapped_data = {
+                "email": candidate_info.get("email"),
+                "candidate_id": candidate_info.get("_id"),
+                "name": candidate_info.get("name", "Unknown")
+            }
+ 
+        return {
+            "status_code": response.status_code,
+            "raw_response": response_data,
+            "mapped_candidate_data": mapped_data,
+            "headers": dict(response.headers),
+            "request_payload": payload
+        }
+ 
+    except Exception as e:
+        print(f"❌ Error in debug endpoint: {str(e)}")
+        return {
+            "error": str(e),
+            "external_api_url": f"{EXTERNAL_API_BASE_URL}/api/jd/get-filteredCandidateByEmail"
+        }
+@router.post("/login", response_model=CandidateLoginResponse)
+async def candidate_login(request: CandidateLoginRequest):
     """
-    Evaluates answers & updates test_results row instead of inserting new.
-    The row is located by candidate_id. Also stamps updated_at and completed_at.
+    Login candidate by email and store their details in test_results table
     """
-    # Evaluate
-    result = await evaluate_test(submission)
-
-    # Duration conversions
-    duration_used_minutes = None
-    if getattr(submission, "duration_used", None):
-        duration_used_minutes = round(submission.duration_used / 60, 2)
-
-    # Ensure candidate_id present
-    if not getattr(submission, "candidate_id", None):
-        raise HTTPException(status_code=400, detail="candidate_id is required")
-
-    candidate_id = str(submission.candidate_id)
-
-    # Ensure row exists
-    existing = (
-        supabase.table("test_results")
-        .select("*")
-        .eq("candidate_id", candidate_id)
-        .execute()
-    )
-    if not existing.data:
-        raise HTTPException(status_code=404, detail="Candidate not found in test_results")
-
-    # Prepare update payload
-    update_data = {
-        "question_set_id": str(submission.question_set_id),
-        "score": result.get("score", 0),
-        "max_score": result.get("max_score", len(submission.questions) * 10),
-        "percentage": result.get("percentage", 0.0),
-        "status": result.get("status", "Completed") or "Completed",
-        "total_questions": len(submission.questions),
-        "raw_feedback": result.get("raw_feedback", ""),
-        "duration_used_seconds": getattr(submission, "duration_used", None),
-        "duration_used_minutes": duration_used_minutes,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    db_result = (
-        supabase.table("test_results")
-        .update(update_data)
-        .eq("candidate_id", candidate_id)
-        .execute()
-    )
-
-    if not db_result.data:
-        raise HTTPException(status_code=500, detail="Failed to update test results")
-
-    # return concise response for frontend
-    return {
-        "score": update_data["score"],
-        "max_score": update_data["max_score"],
-        "percentage": update_data["percentage"],
-        "status": update_data["status"],
-        "raw_feedback": update_data["raw_feedback"],
-        "result_id": db_result.data[0].get("id"),
-        "duration_used": duration_used_minutes,
-    }
+    try:
+        # Debug: Print the incoming request
+        print(f"🔍 Login request received: {request}")
+        print(f"🔍 Request email: {request.email}")
+        # Validate email is not empty
+        if not request.email or request.email.strip() == "":
+            raise HTTPException(
+                status_code=400,
+                detail="Email cannot be empty"
+            )
+ 
+        # Make API call to get candidate details - POST request with JSON body
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {"email": request.email}
+            print(f"🔍 Sending to external API: {payload}")
+            response = await client.post(
+                f"{EXTERNAL_API_BASE_URL}/api/jd/get-filteredCandidateByEmail",
+                json=payload
+            )
+ 
+        print(f"🔍 External API Response Status: {response.status_code}")
+        print(f"🔍 External API Response Text: {response.text}")
+ 
+        if response.status_code != 200:
+            print(f"❌ External API Error - Status: {response.status_code}, Response: {response.text}")
+            raise HTTPException(
+                status_code=response.status_code, 
+                detail=f"Failed to fetch candidate details. API returned: {response.status_code}"
+            )
+ 
+        candidate_data = response.json()
+        print(f"🔍 Raw API Response: {candidate_data}")
+ 
+        # Check if the response has the expected structure
+        if "filteredResumes" not in candidate_data:
+            print(f"❌ Missing 'filteredResumes' in response: {candidate_data}")
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid API response format: missing 'filteredResumes' field"
+            )
+ 
+        # Check if any candidates found
+        if not candidate_data["filteredResumes"] or len(candidate_data["filteredResumes"]) == 0:
+            print(f"❌ No candidates found for email: {request.email}")
+            raise HTTPException(
+                status_code=404,
+                detail="No candidate found with this email"
+            )
+ 
+        # Get the first candidate from the filtered results
+        candidate_info = candidate_data["filteredResumes"][0]
+        print(f"🔍 Candidate info from API: {candidate_info}")
+ 
+        # Map the API fields to our expected format
+        mapped_candidate_data = {
+            "email": candidate_info.get("email"),
+            "candidate_id": candidate_info.get("_id"),  # Map _id to candidate_id
+            "name": candidate_info.get("name", "Unknown")  # Default to "Unknown" if name is missing
+        }
+ 
+        print(f"🔍 Mapped candidate data: {mapped_candidate_data}")
+ 
+        # Validate that we have the essential fields
+        if not mapped_candidate_data["email"] or not mapped_candidate_data["candidate_id"]:
+            print(f"❌ Missing essential fields in candidate info: {candidate_info}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Missing essential fields. Got: {candidate_info}"
+            )
+ 
+        # Check if candidate already has an entry in test_results
+        existing_entry = supabase.table("test_results").select("*").eq(
+            "candidate_id", mapped_candidate_data["candidate_id"]
+        ).execute()
+ 
+        # If no existing entry, create a new one with candidate details
+        if not existing_entry.data:
+            candidate_entry = {
+                "candidate_id": mapped_candidate_data["candidate_id"],
+                "email": mapped_candidate_data["email"],
+                "name": mapped_candidate_data["name"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "Logged In"  # Initial status
+            }
+ 
+            insert_result = supabase.table("test_results").insert(candidate_entry).execute()
+ 
+            if not insert_result.data:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to store candidate details"
+                )
+ 
+            print(f"✅ New candidate logged in and stored: {mapped_candidate_data['name']} ({mapped_candidate_data['email']})")
+        else:
+            print(f"✅ Existing candidate logged in: {mapped_candidate_data['name']} ({mapped_candidate_data['email']})")
+ 
+        return CandidateLoginResponse(
+            email=mapped_candidate_data["email"],
+            candidate_id=mapped_candidate_data["candidate_id"],
+            name=mapped_candidate_data["name"],
+            message="Login successful"
+        )
+ 
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except httpx.RequestError as e:
+        print(f"❌ API Connection Error: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to external API: {str(e)}"
+        )
+    except httpx.TimeoutException:
+        print("❌ API Timeout Error")
+        raise HTTPException(
+            status_code=504,
+            detail="External API request timed out"
+        )
+    except Exception as e:
+        print(f"❌ Unexpected Error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+@router.get("/details/{candidate_id}")
+async def get_candidate_details(candidate_id: str):
+    """
+    Get candidate details by candidate_id
+    """
+    try:
+        result = supabase.table("test_results").select("*").eq(
+            "candidate_id", candidate_id
+        ).execute()
+ 
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Candidate not found"
+            )
+ 
+        return result.data[0]
+ 
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error getting candidate details: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch candidate details: {str(e)}"
+        )
+@router.get("/results/{candidate_id}")
+async def get_candidate_test_results(candidate_id: str):
+    """
+    Get test results for a candidate
+    """
+    try:
+        result = supabase.table("test_results").select("*").eq(
+            "candidate_id", candidate_id
+        ).execute()
+ 
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail="No test results found for this candidate"
+            )
+ 
+        return result.data[0]
+ 
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error getting test results: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch test results: {str(e)}"
+        )
