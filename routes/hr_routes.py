@@ -41,7 +41,7 @@ async def finalize_test(request: TestFinalizeRequest):
             "expires_at": expires_at.isoformat()
         }).execute()
 
-    test_link = f"http://localhost:5173/test/{question_set_id}"
+    test_link = f"https://react-ai-frontend.vercel.app/test/{question_set_id}"
     return {
         "test_link": test_link,
         "test_id": question_set_id,
