@@ -42,7 +42,7 @@ async def call_model(model_name: str, prompt: str):
 async def fetch_job_summary(jd_id: str):
     """Fetch job summary using the provided job description ID"""
     try:
-        JOB_SUMMARY_API_URL = f"http://localhost:5000/api/jd/get-jd-summary/{jd_id}"
+        JOB_SUMMARY_API_URL = f"https://react-ai-frontend.vercel.app/api/jd/get-jd-summary/{jd_id}"
         async with httpx.AsyncClient() as client:
             headers = {
                 "Content-Type": "application/json",  # No JWT needed now
