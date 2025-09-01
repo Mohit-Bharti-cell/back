@@ -16,7 +16,8 @@ async def fetch_test(question_set_id: str):
  
     test_info = res.data[0]  
     expires_at = test_info.get("expires_at")  
-    duration = test_info.get("duration", 20)  # Get duration, default to 20 minutes  
+    duration = test_info.get("duration", 20)  # Get duration, default to 20 minutes
+    jd_id = test_info.get("jd_id")  # Get jd_id from question_sets table
  
     now = datetime.now(timezone.utc)  
     expires_dt = datetime.fromisoformat(expires_at)  
@@ -31,7 +32,8 @@ async def fetch_test(question_set_id: str):
  
     return {  
         "questions": q_res.data,  
-        "duration": duration,  # Include duration in response  
+        "duration": duration,  # Include duration in response
+        "jd_id": jd_id,  # Include jd_id in response
         "test_id": question_set_id  
     }
  
